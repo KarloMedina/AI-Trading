@@ -1,0 +1,118 @@
+import alpaca_trade_api as tradeapi
+import pandas as pd
+import numpy as np
+import talib
+import time
+
+# Replace 'your_api_key' and 'your_secret_key' with your Alpaca API key and secret
+API_KEY = 'your_api_key'
+API_SECRET = 'your_secret_key'
+BASE_URL = 'https://paper-api.alpaca.markets'  # Use 'https://api.alpaca.markets' for live trading
+
+api = tradeapi.REST(API_KEY, API_SECRET, base_url=BASE_URL, api_version='v2')
+
+def get_stock_data(symbol, timeframe, limit):
+    try:
+        barset = api.get_barset(symbol, timeframe, limit=limit)
+        stock_bars = barset[symbol]
+        df = stock_bars.df
+        return df
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        return None
+
+def calculate_indicators(data):
+    data['macd'], data['signal'], _ = talib.MACD(data['close'])
+    data['rsi'] = talib.RSI(data['close'])
+    return data
+
+def calculate_position_size(capital, risk_percentage, volatility):
+    return int((capital * risk_percentage) / volatility)
+
+def execute_trade(symbol, qty, side, order_type='market', stop_loss=None):
+    try:
+        if stop_loss:
+            order = api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type=order_type,
+                time_in_force='gtc',
+                stop_loss={'stop_price': stop_loss}
+            )
+        else:
+            order = api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side=side,
+                type=order_type,
+                time_in_force='gtc'
+            )
+
+        print(f"{side.capitalize()} Signal - Executing Trade")
+        return order
+    except Exception as e:
+        print(f"Error executing trade: {e}")
+        return None
+
+def update_stop_loss(symbol, order_id, new_stop_price):
+    try:
+        api.update_order(
+            order_id=order_id,
+            stop_loss={'stop_price': new_stop_price}
+        )
+        print(f"Updating stop-loss to {new_stop_price}")
+    except Exception as e:
+        print(f"Error updating stop-loss: {e}")
+
+def main():
+    symbol = 'AAPL'  # Change this to the stock you want to trade
+    timeframe = '1D'  # Change this to your desired timeframe
+    limit = 100  # Number of historical data points to retrieve
+    capital = 10000  # Initial capital for trading
+    risk_percentage = 0.02  # Maximum risk per trade as a percentage of capital
+    max_drawdown_percentage = 0.01  # Maximum acceptable drawdown as a percentage of capital
+
+    position_size = 0
+    max_position_size = capital * risk_percentage
+    max_drawdown = capital * max_drawdown_percentage
+    trailing_stop_percentage = 0.02  # Percentage for trailing stop-loss
+
+    while True:
+        data = get_stock_data(symbol, timeframe, limit)
+
+        if data is None or len(data) < limit:
+            print("Not enough data for calculation.")
+            time.sleep(60)  # Sleep for 1 minute and try again
+            continue
+
+        data = calculate_indicators(data)
+
+        last_close = data['close'].iloc[-1]
+        last_macd = data['macd'].iloc[-1]
+        last_signal = data['signal'].iloc[-1]
+        last_rsi = data['rsi'].iloc[-1]
+
+        if last_macd > last_signal and last_rsi < 30:
+            # Buy signal when MACD is above signal and RSI is below 30 (oversold)
+            volatility = np.std(data['close'].pct_change()) * np.sqrt(252)  # Annualized volatility
+            position_size = calculate_position_size(capital, risk_percentage, volatility)
+
+            if position_size > max_position_size:
+                position_size = max_position_size
+
+            if position_size * last_close > max_drawdown:
+                position_size = int(max_drawdown / last_close)
+
+            order = execute_trade(symbol, qty=position_size, side='buy')
+            if order:
+                stop_loss_price = last_close * (1 - trailing_stop_percentage)
+                update_stop_loss(symbol, order.id, stop_loss_price)
+        elif last_macd < last_signal and last_rsi > 70:
+            # Sell signal when MACD is below signal and RSI is above 70 (overbought)
+            execute_trade(symbol, qty=position_size, side='sell')
+
+        time.sleep(60)  # Sleep for 1 minute and repeat
+
+if __name__ == "__main__":
+    main()
